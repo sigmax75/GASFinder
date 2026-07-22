@@ -34,42 +34,74 @@ function onOpen() {
     .addSeparator()
     .addItem('自動調査を開始', 'startAutoScan')
     .addItem('自動調査を停止', 'stopAutoScan')
+    .addSeparator()
+    .addItem('再開位置を設定', 'setResumeIndex')
     .addToUi();
+}
+
+// setResumeIndex - set resume index manually
+function setResumeIndex() {
+  var ui = SpreadsheetApp.getUi();
+  var response = ui.prompt(
+    'Resume Index',
+    'Enter the row number to resume from (0-based index):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() === ui.Button.OK) {
+    var index = parseInt(response.getResponseText(), 10);
+    if (isNaN(index) || index < 0) {
+      ui.alert('Invalid number.');
+      return;
+    }
+    saveResumeIndex_(index);
+    ui.alert('Resume index set to ' + index + '.');
+  }
 }
 
 // ============================================================
 // Manual execution
 // ============================================================
 
-// runGASFinder - manual scan
+// runGASFinder - manual scan with lock
 function runGASFinder() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var fileIds = getFileIds_(ss, true);
-
-  if (fileIds.length === 0) {
-    SpreadsheetApp.getUi().alert('チェック対象のFileIDが見つかりませんでした。');
+  var lock = LockService.getScriptLock();
+  var hasLock = lock.tryLock(10000);
+  if (!hasLock) {
+    SpreadsheetApp.getUi().alert('別の処理が実行中です。しばらく待ってから再実行してください。');
     return;
   }
 
-  var resultSheet = prepareResultSheet_(ss, true);
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var fileIds = getFileIds_(ss, true);
 
-  var results = [];
-  for (var i = 0; i < fileIds.length; i++) {
-    var fileId = fileIds[i].trim();
-    if (fileId === '') continue;
+    if (fileIds.length === 0) {
+      SpreadsheetApp.getUi().alert('チェック対象のFileIDが見つかりませんでした。');
+      return;
+    }
 
-    Logger.log('Processing: ' + (i + 1) + '/' + fileIds.length + ' - ' + fileId);
-    var result = checkFile_(fileId);
-    results.push(result);
+    var resultSheet = prepareResultSheet_(ss, true);
+
+    var results = [];
+    for (var i = 0; i < fileIds.length; i++) {
+      var fileId = fileIds[i].trim();
+      if (fileId === '') continue;
+
+      Logger.log('Processing: ' + (i + 1) + '/' + fileIds.length + ' - ' + fileId);
+      var result = checkFile_(fileId);
+      results.push(result);
+    }
+
+    writeResults_(resultSheet, results);
+
+    SpreadsheetApp.getUi().alert(
+      '調査完了' + '\n' +
+      '処理件数: ' + results.length + '件' + '\n' +
+      '結果は' + CONFIG.OUTPUT_SHEET_NAME + 'シートをご確認ください。'
+    );
+  } finally {
+    lock.releaseLock();
   }
-
-  writeResults_(resultSheet, results);
-
-  SpreadsheetApp.getUi().alert(
-    '調査完了' + '\n' +
-    '処理件数: ' + results.length + '件' + '\n' +
-    '結果は' + CONFIG.OUTPUT_SHEET_NAME + 'シートをご確認ください。'
-  );
 }
 
 // ============================================================
@@ -80,7 +112,14 @@ function runGASFinder() {
 function startAutoScan() {
   var ui = SpreadsheetApp.getUi();
 
-  deleteGASFinderTriggers_();
+  var existingTriggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existingTriggers.length; i++) {
+    if (existingTriggers[i].getHandlerFunction() === 'runAutoScan') {
+      ui.alert('既に自動調査が実行中です。' + '\n' + '停止してから再度開始してください。');
+      return;
+    }
+  }
+
   clearProgress_();
 
   ScriptApp.newTrigger('runAutoScan')
@@ -109,65 +148,76 @@ function stopAutoScan() {
 
 // runAutoScan - triggered auto scan with resume support
 function runAutoScan() {
-  var startTime = new Date().getTime();
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var props = PropertiesService.getScriptProperties();
-
-  var fileIds = getFileIds_(ss, false);
-  if (fileIds.length === 0) {
-    Logger.log('GASFinder: No FileIDs found.');
-    deleteGASFinderTriggers_();
-    clearProgress_();
+  var lock = LockService.getScriptLock();
+  var hasLock = lock.tryLock(10000);
+  if (!hasLock) {
+    Logger.log('GASFinder: Another instance is running. Skipping.');
     return;
   }
 
-  var resumeIndex = getResumeIndex_();
-  var totalCount = fileIds.length;
-  var isFirstRun = (resumeIndex === 0);
+  try {
+    var startTime = new Date().getTime();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var props = PropertiesService.getScriptProperties();
 
-  var resultSheet;
-  if (isFirstRun) {
-    resultSheet = prepareResultSheet_(ss, true);
-    props.setProperty(PROP_KEYS.TOTAL_COUNT, String(totalCount));
-    Logger.log('GASFinder: Starting auto scan - total ' + totalCount + ' files');
-  } else {
-    resultSheet = prepareResultSheet_(ss, false);
-    Logger.log('GASFinder: Resuming from ' + resumeIndex + '/' + totalCount);
-  }
-
-  writeStatus_(resultSheet, resumeIndex, totalCount, 'Processing...');
-
-  var results = [];
-
-  for (var i = resumeIndex; i < fileIds.length; i++) {
-    var elapsed = (new Date().getTime() - startTime) / 1000;
-    if (elapsed >= CONFIG.TIME_LIMIT_SEC) {
-      saveResumeIndex_(i);
-      Logger.log('GASFinder: Time limit - ' + i + '/' + totalCount + ' processed');
-
-      if (results.length > 0) {
-        appendResults_(resultSheet, results);
-      }
-      writeStatus_(resultSheet, i, totalCount, 'Suspended - next trigger');
+    var fileIds = getFileIds_(ss, false);
+    if (fileIds.length === 0) {
+      Logger.log('GASFinder: No FileIDs found.');
+      deleteGASFinderTriggers_();
+      clearProgress_();
       return;
     }
 
-    var fileId = fileIds[i].trim();
-    if (fileId === '') continue;
+    var resumeIndex = getResumeIndex_();
+    var totalCount = fileIds.length;
+    var isFirstRun = (resumeIndex === 0);
 
-    Logger.log('Processing: ' + (i + 1) + '/' + totalCount + ' - ' + fileId);
-    var result = checkFile_(fileId);
-    results.push(result);
+    var resultSheet;
+    if (isFirstRun) {
+      resultSheet = prepareResultSheet_(ss, true);
+      props.setProperty(PROP_KEYS.TOTAL_COUNT, String(totalCount));
+      Logger.log('GASFinder: Starting auto scan - total ' + totalCount + ' files');
+    } else {
+      resultSheet = prepareResultSheet_(ss, false);
+      Logger.log('GASFinder: Resuming from ' + resumeIndex + '/' + totalCount);
+    }
+
+    writeStatus_(resultSheet, resumeIndex, totalCount, 'Processing...');
+
+    var results = [];
+
+    for (var i = resumeIndex; i < fileIds.length; i++) {
+      var elapsed = (new Date().getTime() - startTime) / 1000;
+      if (elapsed >= CONFIG.TIME_LIMIT_SEC) {
+        saveResumeIndex_(i);
+        Logger.log('GASFinder: Time limit - ' + i + '/' + totalCount + ' processed');
+
+        if (results.length > 0) {
+          appendResults_(resultSheet, results);
+        }
+        writeStatus_(resultSheet, i, totalCount, 'Suspended - next trigger');
+        return;
+      }
+
+      var fileId = fileIds[i].trim();
+      if (fileId === '') continue;
+
+      Logger.log('Processing: ' + (i + 1) + '/' + totalCount + ' - ' + fileId);
+      var result = checkFile_(fileId);
+      results.push(result);
+    }
+
+    if (results.length > 0) {
+      appendResults_(resultSheet, results);
+    }
+    writeStatus_(resultSheet, totalCount, totalCount, 'Completed');
+    Logger.log('GASFinder: All done - ' + totalCount + ' files');
+
+    deleteGASFinderTriggers_();
+    clearProgress_();
+  } finally {
+    lock.releaseLock();
   }
-
-  if (results.length > 0) {
-    appendResults_(resultSheet, results);
-  }
-  writeStatus_(resultSheet, totalCount, totalCount, 'Completed');
-  Logger.log('GASFinder: All done - ' + totalCount + ' files');
-
-  deleteGASFinderTriggers_();
-  clearProgress_();
 }
 
 // ============================================================
