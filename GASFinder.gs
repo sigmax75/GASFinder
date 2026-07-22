@@ -1,6 +1,7 @@
 // ============================================================
 // CONFIG
 // ============================================================
+// No need to add Drive Advanced Service - uses DriveApp and UrlFetchApp only
 var CONFIG = {
   INPUT_SHEET_NAME: 'FileID一覧',
   OUTPUT_SHEET_NAME: '結果',
@@ -274,13 +275,12 @@ function checkFile_(fileId) {
   };
 
   try {
-    var fileMeta = Drive.Files.get(fileId, { fields: 'name,owners' });
-    result.fileName = fileMeta.name || '';
-    if (fileMeta.owners && fileMeta.owners.length > 0) {
-      result.owner = fileMeta.owners[0].emailAddress || '';
-    }
+    var file = DriveApp.getFileById(fileId);
+    result.fileName = file.getName();
+    var owner = file.getOwner();
+    result.owner = owner ? owner.getEmail() : '';
   } catch (e) {
-    Logger.log('DEBUG Drive.Files.get error: ' + String(e) + ' | message: ' + (e.message || 'none'));
+    Logger.log('DEBUG DriveApp.getFileById error: ' + String(e) + ' | message: ' + (e.message || 'none'));
     var errMsg = String(e.message || e);
     if (errMsg.indexOf('not found') !== -1 || errMsg.indexOf('404') !== -1) {
       result.error = 'ファイル不明';
@@ -319,32 +319,33 @@ function checkFile_(fileId) {
 // Drive API detection
 // ============================================================
 
-// checkGasByDriveApi_ - search for container-bound scripts via Drive API
+// checkGasByDriveApi_ - search for container-bound scripts via Drive REST API v3
 function checkGasByDriveApi_(fileId) {
   var result = { found: false, scriptName: '' };
-
   try {
-    var query = "'" + fileId + "' in parents" +
-      " and mimeType = 'application/vnd.google-apps.script'" +
-      " and trashed = false";
-    var response = Drive.Files.list({
-      q: query,
-      fields: 'files(name)',
-      pageSize: 10
-    });
-
-    if (response.files && response.files.length > 0) {
-      result.found = true;
-      var names = [];
-      for (var i = 0; i < response.files.length; i++) {
-        names.push(response.files[i].name);
+    var token = ScriptApp.getOAuthToken();
+    var query = encodeURIComponent("'" + fileId + "' in parents and mimeType = 'application/vnd.google-apps.script' and trashed = false");
+    var url = 'https://www.googleapis.com/drive/v3/files?q=' + query + '&fields=files(name)&pageSize=10';
+    var options = {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true
+    };
+    var response = UrlFetchApp.fetch(url, options);
+    if (response.getResponseCode() === 200) {
+      var json = JSON.parse(response.getContentText());
+      if (json.files && json.files.length > 0) {
+        result.found = true;
+        var names = [];
+        for (var i = 0; i < json.files.length; i++) {
+          names.push(json.files[i].name);
+        }
+        result.scriptName = names.join(', ');
       }
-      result.scriptName = names.join(', ');
     }
   } catch (e) {
     Logger.log('Drive API search error (fileId: ' + fileId + '): ' + e.message);
   }
-
   return result;
 }
 
