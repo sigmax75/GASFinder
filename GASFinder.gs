@@ -319,13 +319,13 @@ function checkFile_(fileId) {
 // Drive API detection
 // ============================================================
 
-// checkGasByDriveApi_ - search for container-bound scripts via Drive REST API v3
+// checkGasByDriveApi_ - search for container-bound scripts via Drive API v2 children.list
 function checkGasByDriveApi_(fileId) {
   var result = { found: false, scriptName: '' };
   try {
     var token = ScriptApp.getOAuthToken();
-    var query = encodeURIComponent("'" + fileId + "' in parents and mimeType = 'application/vnd.google-apps.script' and trashed = false");
-    var url = 'https://www.googleapis.com/drive/v3/files?q=' + query + '&fields=files(name)&pageSize=10';
+    // Try Drive API v2 children.list
+    var url = 'https://www.googleapis.com/drive/v2/files/' + fileId + '/children?q=' + encodeURIComponent("mimeType='application/vnd.google-apps.script'");
     var options = {
       method: 'get',
       headers: { Authorization: 'Bearer ' + token },
@@ -334,13 +334,41 @@ function checkGasByDriveApi_(fileId) {
     var response = UrlFetchApp.fetch(url, options);
     if (response.getResponseCode() === 200) {
       var json = JSON.parse(response.getContentText());
-      if (json.files && json.files.length > 0) {
+      if (json.items && json.items.length > 0) {
         result.found = true;
+        // Get script names
         var names = [];
-        for (var i = 0; i < json.files.length; i++) {
-          names.push(json.files[i].name);
+        for (var i = 0; i < json.items.length; i++) {
+          try {
+            var childId = json.items[i].id;
+            var metaUrl = 'https://www.googleapis.com/drive/v2/files/' + childId + '?fields=title';
+            var metaResp = UrlFetchApp.fetch(metaUrl, options);
+            if (metaResp.getResponseCode() === 200) {
+              var meta = JSON.parse(metaResp.getContentText());
+              names.push(meta.title || childId);
+            }
+          } catch (e2) {
+            names.push(json.items[i].id);
+          }
         }
         result.scriptName = names.join(', ');
+      }
+    } else {
+      // v2 failed, fallback to v3
+      Logger.log('Drive API v2 failed (' + response.getResponseCode() + '), trying v3');
+      var query = encodeURIComponent("'" + fileId + "' in parents and mimeType = 'application/vnd.google-apps.script' and trashed = false");
+      var v3url = 'https://www.googleapis.com/drive/v3/files?q=' + query + '&fields=files(name)&pageSize=10';
+      var v3resp = UrlFetchApp.fetch(v3url, options);
+      if (v3resp.getResponseCode() === 200) {
+        var v3json = JSON.parse(v3resp.getContentText());
+        if (v3json.files && v3json.files.length > 0) {
+          result.found = true;
+          var v3names = [];
+          for (var j = 0; j < v3json.files.length; j++) {
+            v3names.push(v3json.files[j].name);
+          }
+          result.scriptName = v3names.join(', ');
+        }
       }
     }
   } catch (e) {
