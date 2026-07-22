@@ -1,13 +1,12 @@
 // ============================================================
 // CONFIG
 // ============================================================
-// No need to add Drive Advanced Service - uses DriveApp and UrlFetchApp only
+// No need to add Drive Advanced Service - uses DriveApp and SpreadsheetApp only
 var CONFIG = {
   INPUT_SHEET_NAME: 'FileID一覧',
   OUTPUT_SHEET_NAME: '結果',
   INPUT_SOURCE: 'sheet',
   HARDCODED_FILE_IDS: [],
-  USE_APPS_SCRIPT_API: false,
   TIME_LIMIT_SEC: 240,
   TRIGGER_INTERVAL_MIN: 5,
   HIGHLIGHT_COLOR: '#FFFF00',
@@ -220,7 +219,6 @@ function writeStatus_(sheet, processed, total, status) {
   sheet.setColumnWidth(7, 350);
   Logger.log('GASFinder: ' + statusText);
 }
-
 // ============================================================
 // FileID retrieval
 // ============================================================
@@ -262,7 +260,7 @@ function getFileIds_(ss, useUi) {
 // File check
 // ============================================================
 
-// checkFile_ - check single file for bound GAS
+// checkFile_ - check single file for bound GAS via indirect detection
 function checkFile_(fileId) {
   var result = {
     fileId: fileId,
@@ -293,134 +291,143 @@ function checkFile_(fileId) {
     return result;
   }
 
-  var driveResult = checkGasByDriveApi_(fileId);
-  if (driveResult.found) {
+  var indirectResult = checkGasIndirect_(fileId);
+  if (indirectResult.found) {
     result.hasGas = true;
-    result.scriptName = driveResult.scriptName;
-    return result;
-  }
-
-  if (CONFIG.USE_APPS_SCRIPT_API) {
-    var apiResult = checkGasByAppsScriptApi_(fileId);
-    if (apiResult.found) {
-      result.hasGas = true;
-      result.scriptName = apiResult.scriptName;
-      return result;
-    }
-    if (apiResult.error) {
-      result.scriptName = '(API check failed: ' + apiResult.error + ')';
-    }
+    result.scriptName = indirectResult.scriptName;
+  } else if (indirectResult.details && indirectResult.details.indexOf('check failed') === 0) {
+    result.scriptName = indirectResult.details;
   }
 
   return result;
 }
 
 // ============================================================
-// Drive API detection
+// Indirect GAS detection via custom function scan
 // ============================================================
 
-// checkGasByDriveApi_ - search for container-bound scripts via Drive API v2 children.list
-function checkGasByDriveApi_(fileId) {
-  var result = { found: false, scriptName: '' };
+// checkGasIndirect_ - detect GAS by finding custom functions in formulas
+function checkGasIndirect_(fileId) {
+  var result = { found: false, scriptName: '', details: '' };
   try {
-    var token = ScriptApp.getOAuthToken();
-    // Try Drive API v2 children.list
-    var url = 'https://www.googleapis.com/drive/v2/files/' + fileId + '/children?q=' + encodeURIComponent("mimeType='application/vnd.google-apps.script'");
-    var options = {
-      method: 'get',
-      headers: { Authorization: 'Bearer ' + token },
-      muteHttpExceptions: true
-    };
-    var response = UrlFetchApp.fetch(url, options);
-    if (response.getResponseCode() === 200) {
-      var json = JSON.parse(response.getContentText());
-      if (json.items && json.items.length > 0) {
-        result.found = true;
-        // Get script names
-        var names = [];
-        for (var i = 0; i < json.items.length; i++) {
-          try {
-            var childId = json.items[i].id;
-            var metaUrl = 'https://www.googleapis.com/drive/v2/files/' + childId + '?fields=title';
-            var metaResp = UrlFetchApp.fetch(metaUrl, options);
-            if (metaResp.getResponseCode() === 200) {
-              var meta = JSON.parse(metaResp.getContentText());
-              names.push(meta.title || childId);
+    var ss = SpreadsheetApp.openById(fileId);
+    var sheets = ss.getSheets();
+    var customFuncs = [];
+
+    for (var s = 0; s < sheets.length; s++) {
+      var sheet = sheets[s];
+      var range = sheet.getDataRange();
+      var formulas = range.getFormulas();
+
+      for (var r = 0; r < formulas.length; r++) {
+        for (var c = 0; c < formulas[r].length; c++) {
+          var formula = formulas[r][c];
+          if (formula === '') continue;
+
+          // Extract function names from formula
+          var funcMatches = formula.match(/[A-Za-z_][A-Za-z0-9_]*\s*\(/g);
+          if (!funcMatches) continue;
+
+          for (var m = 0; m < funcMatches.length; m++) {
+            var funcName = funcMatches[m].replace(/\s*\($/, '').toUpperCase();
+            if (!isBuiltinFunction_(funcName)) {
+              customFuncs.push(funcName.toLowerCase());
             }
-          } catch (e2) {
-            names.push(json.items[i].id);
           }
-        }
-        result.scriptName = names.join(', ');
-      }
-    } else {
-      // v2 failed, fallback to v3
-      Logger.log('Drive API v2 failed (' + response.getResponseCode() + '), trying v3');
-      var query = encodeURIComponent("'" + fileId + "' in parents and mimeType = 'application/vnd.google-apps.script' and trashed = false");
-      var v3url = 'https://www.googleapis.com/drive/v3/files?q=' + query + '&fields=files(name)&pageSize=10';
-      var v3resp = UrlFetchApp.fetch(v3url, options);
-      if (v3resp.getResponseCode() === 200) {
-        var v3json = JSON.parse(v3resp.getContentText());
-        if (v3json.files && v3json.files.length > 0) {
-          result.found = true;
-          var v3names = [];
-          for (var j = 0; j < v3json.files.length; j++) {
-            v3names.push(v3json.files[j].name);
-          }
-          result.scriptName = v3names.join(', ');
         }
       }
     }
+
+    if (customFuncs.length > 0) {
+      // Remove duplicates
+      var unique = [];
+      for (var i = 0; i < customFuncs.length; i++) {
+        if (unique.indexOf(customFuncs[i]) === -1) {
+          unique.push(customFuncs[i]);
+        }
+      }
+      result.found = true;
+      result.scriptName = unique.join(', ');
+      result.details = 'custom functions detected';
+    }
   } catch (e) {
-    Logger.log('Drive API search error (fileId: ' + fileId + '): ' + e.message);
+    Logger.log('Indirect check error (fileId: ' + fileId + '): ' + e.message);
+    result.details = 'check failed: ' + e.message;
   }
   return result;
 }
 
 // ============================================================
-// Apps Script API detection (fallback)
+// Built-in function list
 // ============================================================
 
-// checkGasByAppsScriptApi_ - check via Apps Script API
-function checkGasByAppsScriptApi_(fileId) {
-  var result = { found: false, scriptName: '', error: '' };
-
-  try {
-    var token = ScriptApp.getOAuthToken();
-    var url = 'https://script.googleapis.com/v1/processes?' +
-      'userProcessFilter.scriptId=' + fileId;
-
-    var options = {
-      method: 'get',
-      headers: {
-        Authorization: 'Bearer ' + token
-      },
-      muteHttpExceptions: true
-    };
-
-    var response = UrlFetchApp.fetch(url, options);
-    var code = response.getResponseCode();
-
-    if (code === 200) {
-      var json = JSON.parse(response.getContentText());
-      if (json.processes && json.processes.length > 0) {
-        result.found = true;
-        result.scriptName = '(Detected via Apps Script API)';
-      }
-    } else if (code === 404) {
-      // No script found - normal
-    } else {
-      result.error = 'HTTP ' + code;
-    }
-  } catch (e) {
-    result.error = String(e.message || e);
-    Logger.log('Apps Script API error (fileId: ' + fileId + '): ' + e.message);
-  }
-
-  return result;
+// isBuiltinFunction_ - check if a function name is a standard Sheets function
+function isBuiltinFunction_(name) {
+  return BUILTIN_FUNCTIONS_.indexOf(name) !== -1;
 }
 
-// ============================================================
+// BUILTIN_FUNCTIONS_ - list of standard Google Sheets functions (uppercase)
+var BUILTIN_FUNCTIONS_ = [
+  'ABS', 'ACCRINT', 'ACCRINTM', 'ACOS', 'ACOSH', 'ADDRESS', 'AMORLINC', 'AND',
+  'ARRAYFORMULA', 'ASC', 'ASIN', 'ASINH', 'ATAN', 'ATAN2', 'ATANH', 'AVEDEV',
+  'AVERAGE', 'AVERAGEA', 'AVERAGEIF', 'AVERAGEIFS', 'BASE', 'BETA.DIST', 'BETA.INV', 'BIN2DEC',
+  'BIN2HEX', 'BIN2OCT', 'BINOM.DIST', 'BINOM.DIST.RANGE', 'BINOM.INV', 'BITAND', 'BITLSHIFT', 'BITOR',
+  'BITRSHIFT', 'BITXOR', 'BYCOL', 'BYROW', 'CEILING', 'CELL', 'CHAR', 'CHISQ.DIST',
+  'CHISQ.DIST.RT', 'CHISQ.INV', 'CHISQ.INV.RT', 'CHISQ.TEST', 'CHOOSE', 'CHOOSECOLS', 'CHOOSEROWS', 'CLEAN',
+  'CODE', 'COLUMN', 'COLUMNS', 'COMBIN', 'COMBINA', 'COMPLEX', 'CONCAT', 'CONCATENATE',
+  'CONFIDENCE', 'CONFIDENCE.NORM', 'CONFIDENCE.T', 'CONVERT', 'CORREL', 'COS', 'COSH', 'COT',
+  'COTH', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'COUNTIFS', 'COUPDAYBS', 'COUPDAYS',
+  'COUPDAYSNC', 'COUPNCD', 'COUPNUM', 'COUPPCD', 'COVARIANCE.P', 'COVARIANCE.S', 'CSC', 'CSCH',
+  'CUMIPMT', 'CUMPRINC', 'DATE', 'DATEDIF', 'DATEVALUE', 'DAVERAGE', 'DAY', 'DAYS',
+  'DAYS360', 'DB', 'DCOUNT', 'DCOUNTA', 'DDB', 'DEC2BIN', 'DEC2HEX', 'DEC2OCT',
+  'DECIMAL', 'DEGREES', 'DELTA', 'DETECT.LANGUAGE', 'DETECTLANGUAGE', 'DEVSQ', 'DGET', 'DISC',
+  'DMAX', 'DMIN', 'DOLLAR', 'DOLLARDE', 'DOLLARFR', 'DPRODUCT', 'DSTDEV', 'DSTDEVP',
+  'DSUM', 'DURATION', 'DVAR', 'DVARP', 'EDATE', 'EFFECT', 'ENCODEURL', 'EOMONTH',
+  'ERF', 'ERF.PRECISE', 'ERFC', 'ERFC.PRECISE', 'ERROR.TYPE', 'EVEN', 'EXACT', 'EXP',
+  'EXPON.DIST', 'F.DIST', 'F.DIST.RT', 'F.INV', 'F.INV.RT', 'F.TEST', 'FACT', 'FACTDOUBLE',
+  'FALSE', 'FIELDVALUE', 'FILTER', 'FIND', 'FINDB', 'FISHER', 'FISHERINV', 'FIXED',
+  'FLATTEN', 'FLOOR', 'FORECAST', 'FORECAST.LINEAR', 'FORMULATEXT', 'FREQUENCY', 'FV', 'FVSCHEDULE',
+  'GAMMA', 'GAMMA.DIST', 'GAMMA.INV', 'GAMMALN', 'GAMMALN.PRECISE', 'GAUSS', 'GCD', 'GEOMEAN',
+  'GESTEP', 'GETPIVOTDATA', 'GOOGLEFINANCE', 'GOOGLETRANSLATE', 'GROWTH', 'HARMEAN', 'HEX2BIN', 'HEX2DEC',
+  'HEX2OCT', 'HLOOKUP', 'HOUR', 'HSTACK', 'HYPGEOM.DIST', 'HYPERLINK', 'IF', 'IFERROR',
+  'IFNA', 'IFS', 'IMAGE', 'IMABS', 'IMAGINARY', 'IMARGUMENT', 'IMCONJUGATE', 'IMCOS',
+  'IMCOSH', 'IMCOT', 'IMCSC', 'IMCSCH', 'IMDIV', 'IMEXP', 'IMLN', 'IMLOG10',
+  'IMLOG2', 'IMPOWER', 'IMPORTDATA', 'IMPORTFEED', 'IMPORTHTML', 'IMPORTRANGE', 'IMPORTXML', 'IMPRODUCT',
+  'IMREAL', 'IMSEC', 'IMSECH', 'IMSIN', 'IMSINH', 'IMSQRT', 'IMSUB', 'IMSUM',
+  'IMTAN', 'INDEX', 'INDIRECT', 'INFO', 'INT', 'INTERCEPT', 'INTRATE', 'IPMT',
+  'IRR', 'ISBLANK', 'ISERR', 'ISERROR', 'ISEVEN', 'ISFORMULA', 'ISLOGICAL', 'ISNA',
+  'ISNONTEXT', 'ISNUMBER', 'ISODD', 'ISOWEEKNUM', 'ISPMT', 'ISREF', 'ISTEXT', 'ISURL',
+  'JIS', 'JOIN', 'KURT', 'LAMBDA', 'LARGE', 'LCM', 'LEFT', 'LEFTB',
+  'LEN', 'LENB', 'LET', 'LINEST', 'LN', 'LOG', 'LOG10', 'LOGEST',
+  'LOGNORM.DIST', 'LOGNORM.INV', 'LOOKUP', 'LOWER', 'MAKEARRAY', 'MAP', 'MARGINOFERROR', 'MATCH',
+  'MAX', 'MAXA', 'MAXIFS', 'MDETERM', 'MDURATION', 'MEDIAN', 'MID', 'MIDB',
+  'MIN', 'MINA', 'MINIFS', 'MINVERSE', 'MINUTE', 'MIRR', 'MMULT', 'MOD',
+  'MODE', 'MODE.MULT', 'MODE.SNGL', 'MONTH', 'MROUND', 'MULTINOMIAL', 'MUNIT', 'N',
+  'NA', 'NEGBINOM.DIST', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'NOMINAL', 'NORM.DIST', 'NORM.INV', 'NORM.S.DIST',
+  'NORM.S.INV', 'NOT', 'NOW', 'NPER', 'NPV', 'OCT2BIN', 'OCT2DEC', 'OCT2HEX',
+  'ODD', 'OFFSET', 'OR', 'PDURATION', 'PEARSON', 'PERCENTILE', 'PERCENTILE.EXC', 'PERCENTILE.INC',
+  'PERCENTRANK', 'PERCENTRANK.EXC', 'PERCENTRANK.INC', 'PERMUT', 'PERMUTATIONA', 'PHI', 'PI', 'PMT',
+  'POISSON', 'POISSON.DIST', 'POWER', 'PPMT', 'PRICE', 'PRICEDISC', 'PRICEMAT', 'PROB',
+  'PRODUCT', 'PROPER', 'PV', 'QUARTILE', 'QUARTILE.EXC', 'QUARTILE.INC', 'QUERY', 'QUOTIENT',
+  'RADIANS', 'RAND', 'RANDBETWEEN', 'RANK', 'RANK.AVG', 'RANK.EQ', 'RATE', 'RECEIVED',
+  'REDUCE', 'REGEXEXTRACT', 'REGEXMATCH', 'REGEXREPLACE', 'REPLACE', 'REPLACEB', 'REPT', 'RIGHT',
+  'RIGHTB', 'ROMAN', 'ROUND', 'ROUNDDOWN', 'ROUNDUP', 'ROW', 'ROWS', 'RRI',
+  'RSQ', 'SCAN', 'SEARCH', 'SEARCHB', 'SEC', 'SECH', 'SECOND', 'SEQUENCE',
+  'SERIESSUM', 'SHEET', 'SHEETS', 'SIGN', 'SIN', 'SINH', 'SKEW', 'SKEW.P',
+  'SLN', 'SLOPE', 'SMALL', 'SORT', 'SORTBY', 'SPARKLINE', 'SPLIT', 'SQRT',
+  'SQRTPI', 'STANDARDIZE', 'STDEV', 'STDEV.P', 'STDEV.S', 'STDEVA', 'STDEVP', 'STDEVPA',
+  'STEYX', 'SUBSTITUTE', 'SUBTOTAL', 'SUM', 'SUMIF', 'SUMIFS', 'SUMPRODUCT', 'SUMSQ',
+  'SUMX2MY2', 'SUMX2PY2', 'SUMXMY2', 'SWITCH', 'SYD', 'T', 'T.DIST', 'T.DIST.2T',
+  'T.DIST.RT', 'T.INV', 'T.INV.2T', 'T.TEST', 'TAN', 'TANH', 'TBILLEQ', 'TBILLPRICE',
+  'TBILLYIELD', 'TEXT', 'TEXTJOIN', 'TIME', 'TIMEVALUE', 'TOCOL', 'TODAY', 'TO_DATE',
+  'TO_DOLLARS', 'TO_PERCENT', 'TO_PURE_NUMBER', 'TO_TEXT', 'TOROW', 'TRANSPOSE', 'TREND', 'TRIM',
+  'TRIMMEAN', 'TRUE', 'TRUNC', 'TYPE', 'UNICHAR', 'UNICODE', 'UNIQUE', 'UPPER',
+  'VALUE', 'VAR', 'VAR.P', 'VAR.S', 'VARA', 'VARP', 'VARPA', 'VDB',
+  'VLOOKUP', 'VSTACK', 'WEEKDAY', 'WEEKNUM', 'WEIBULL', 'WEIBULL.DIST', 'WORKDAY', 'WORKDAY.INTL',
+  'WRAPCOLS', 'WRAPROWS', 'XIRR', 'XLOOKUP', 'XMATCH', 'XNPV', 'XOR', 'YEAR',
+  'YEARFRAC', 'YIELD', 'YIELDDISC', 'YIELDMAT', 'Z.TEST', 'ZTEST'
+];
+
 // Result sheet setup
 // ============================================================
 
@@ -448,7 +455,7 @@ function prepareResultSheet_(ss, clearSheet) {
     sheet.setColumnWidth(1, 320);
     sheet.setColumnWidth(2, 250);
     sheet.setColumnWidth(3, 220);
-    sheet.setColumnWidth(4, 80);
+    sheet.setColumnWidth(4, 130);
     sheet.setColumnWidth(5, 200);
     sheet.setColumnWidth(6, 160);
 
@@ -489,6 +496,7 @@ function appendResults_(sheet, results) {
   highlightGasRows_(sheet, results, startRow);
 }
 
+
 // buildResultRows_ - build 2D array from results
 function buildResultRows_(results) {
   var rows = [];
@@ -497,8 +505,12 @@ function buildResultRows_(results) {
     var gasStatus;
     if (r.error) {
       gasStatus = r.error;
+    } else if (r.hasGas) {
+      gasStatus = 'あり (custom func)';
+    } else if (r.scriptName && r.scriptName.indexOf('check failed') === 0) {
+      gasStatus = 'check failed';
     } else {
-      gasStatus = r.hasGas ? 'あり' : 'なし';
+      gasStatus = 'なし';
     }
 
     rows.push([
