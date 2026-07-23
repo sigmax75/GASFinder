@@ -19,7 +19,11 @@ var CONFIG = {
 // ============================================================
 var PROP_KEYS = {
   RESUME_INDEX: 'GASFINDER_RESUME_INDEX',
-  TOTAL_COUNT: 'GASFINDER_TOTAL_COUNT'
+  TOTAL_COUNT: 'GASFINDER_TOTAL_COUNT',
+  PROCESS_CACHE: 'GASFINDER_PROCESS_CACHE',
+  PROCESS_CACHE_TIME: 'GASFINDER_PROCESS_CACHE_TIME',
+  PROCESS_PARTIAL: 'GASFINDER_PROCESS_PARTIAL',
+  PROCESS_PARTIAL_IDX: 'GASFINDER_PROCESS_PARTIAL_IDX'
 };
 
 // ============================================================
@@ -36,6 +40,8 @@ function onOpen() {
     .addItem('自動調査を停止', 'stopAutoScan')
     .addSeparator()
     .addItem('再開位置を設定', 'setResumeIndex')
+    .addSeparator()
+    .addItem('キャッシュクリア', 'clearProcessCache')
     .addToUi();
 }
 
@@ -250,6 +256,10 @@ function clearProgress_() {
   var props = PropertiesService.getScriptProperties();
   props.deleteProperty(PROP_KEYS.RESUME_INDEX);
   props.deleteProperty(PROP_KEYS.TOTAL_COUNT);
+  props.deleteProperty(PROP_KEYS.PROCESS_CACHE);
+  props.deleteProperty(PROP_KEYS.PROCESS_CACHE_TIME);
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL);
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL_IDX);
 }
 
 // ============================================================
@@ -321,6 +331,20 @@ function getFileIds_(ss, useUi) {
 // checkGasByProcesses_ - bulk check fileIds using processes.list API
 // Returns object: { fileId: { found: true/false, scriptName: str }, ... }
 function checkGasByProcesses_(fileIds) {
+  var props = PropertiesService.getScriptProperties();
+
+  // Cache check (1 hour TTL)
+  var cacheTime = props.getProperty(PROP_KEYS.PROCESS_CACHE_TIME);
+  var cached = props.getProperty(PROP_KEYS.PROCESS_CACHE);
+  if (cached && cacheTime) {
+    var age = (new Date().getTime() - parseInt(cacheTime, 10)) / 1000;
+    if (age < 3600) {
+      Logger.log('Using cached process results');
+      return JSON.parse(cached);
+    }
+  }
+
+  var startTime = new Date().getTime();
   var result = {};
   for (var i = 0; i < fileIds.length; i++) {
     result[fileIds[i].trim()] = { found: false, scriptName: '' };
@@ -333,39 +357,65 @@ function checkGasByProcesses_(fileIds) {
     muteHttpExceptions: true
   };
 
-  // 1. Fetch all processes with pagination
+  // 1. Fetch all processes with pagination (partial cache support)
   var scriptIds = {};
-  var nextPageToken = null;
+  var partialIdx = 0;
+  var partial = props.getProperty(PROP_KEYS.PROCESS_PARTIAL);
+  if (partial) {
+    scriptIds = JSON.parse(partial);
+    var savedIdx = props.getProperty(PROP_KEYS.PROCESS_PARTIAL_IDX);
+    partialIdx = savedIdx ? parseInt(savedIdx, 10) : 0;
+    Logger.log('Resuming from partial cache: ' + Object.keys(scriptIds).length + ' scriptIds, idx=' + partialIdx);
+  } else {
+    // processes.list
+    var nextPageToken = null;
 
-  do {
-    var url = 'https://script.googleapis.com/v1/processes?pageSize=200';
-    if (nextPageToken) {
-      url += '&pageToken=' + nextPageToken;
-    }
-    var response = UrlFetchApp.fetch(url, options);
-    var code = response.getResponseCode();
-    if (code !== 200) {
-      Logger.log('processes.list failed: HTTP ' + code);
-      break;
-    }
-    var data = JSON.parse(response.getContentText());
-    var processes = data.processes || [];
-
-    for (var p = 0; p < processes.length; p++) {
-      var proc = processes[p];
-      if (proc.scriptId && !scriptIds[proc.scriptId]) {
-        scriptIds[proc.scriptId] = true;
+    do {
+      var elapsed = (new Date().getTime() - startTime) / 1000;
+      if (elapsed > 180) {
+        props.setProperty(PROP_KEYS.PROCESS_PARTIAL, JSON.stringify(scriptIds));
+        props.setProperty(PROP_KEYS.PROCESS_PARTIAL_IDX, '0');
+        Logger.log('Process scan timeout at processes.list. Saved partial.');
+        return result;
       }
-    }
 
-    nextPageToken = data.nextPageToken || null;
-  } while (nextPageToken);
+      var url = 'https://script.googleapis.com/v1/processes?pageSize=200';
+      if (nextPageToken) {
+        url += '&pageToken=' + nextPageToken;
+      }
+      var response = UrlFetchApp.fetch(url, options);
+      var code = response.getResponseCode();
+      if (code !== 200) {
+        Logger.log('processes.list failed: HTTP ' + code);
+        break;
+      }
+      var data = JSON.parse(response.getContentText());
+      var processes = data.processes || [];
+
+      for (var p = 0; p < processes.length; p++) {
+        var proc = processes[p];
+        if (proc.scriptId && !scriptIds[proc.scriptId]) {
+          scriptIds[proc.scriptId] = true;
+        }
+      }
+
+      nextPageToken = data.nextPageToken || null;
+    } while (nextPageToken);
+  }
 
   // 2. For each unique scriptId, get parentId via projects.get
   var parentMap = {};
   var scriptIdList = Object.keys(scriptIds);
 
-  for (var s = 0; s < scriptIdList.length; s++) {
+  for (var s = partialIdx; s < scriptIdList.length; s++) {
+    var elapsed2 = (new Date().getTime() - startTime) / 1000;
+    if (elapsed2 > 180) {
+      props.setProperty(PROP_KEYS.PROCESS_PARTIAL, JSON.stringify(scriptIds));
+      props.setProperty(PROP_KEYS.PROCESS_PARTIAL_IDX, String(s));
+      Logger.log('Process scan timeout at projects.get (' + s + '/' + scriptIdList.length + '). Saved partial.');
+      return result;
+    }
+
     var sid = scriptIdList[s];
     var projUrl = 'https://script.googleapis.com/v1/projects/' + sid;
     var projResp = UrlFetchApp.fetch(projUrl, options);
@@ -397,8 +447,24 @@ function checkGasByProcesses_(fileIds) {
     }
   }
 
+  // 4. Save cache, clear partial
+  props.setProperty(PROP_KEYS.PROCESS_CACHE, JSON.stringify(result));
+  props.setProperty(PROP_KEYS.PROCESS_CACHE_TIME, String(new Date().getTime()));
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL);
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL_IDX);
+
   Logger.log('checkGasByProcesses_: ' + scriptIdList.length + ' scriptIds, ' + Object.keys(parentMap).length + ' parents mapped');
   return result;
+}
+
+// clearProcessCache - clear process cache manually
+function clearProcessCache() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty(PROP_KEYS.PROCESS_CACHE);
+  props.deleteProperty(PROP_KEYS.PROCESS_CACHE_TIME);
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL);
+  props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL_IDX);
+  SpreadsheetApp.getUi().alert('Process cache cleared.');
 }
 
 // ============================================================
