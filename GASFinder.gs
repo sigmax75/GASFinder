@@ -82,13 +82,17 @@ function runGASFinder() {
 
     var resultSheet = prepareResultSheet_(ss, true);
 
+    // Pre-fetch process-based GAS detection for all fileIds
+    var processResults = checkGasByProcesses_(fileIds);
+
     var results = [];
     for (var i = 0; i < fileIds.length; i++) {
       var fileId = fileIds[i].trim();
       if (fileId === '') continue;
 
       Logger.log('Processing: ' + (i + 1) + '/' + fileIds.length + ' - ' + fileId);
-      var result = checkFile_(fileId);
+      var procRes = processResults[fileId] || null;
+      var result = checkFile_(fileId, procRes);
       results.push(result);
     }
 
@@ -184,6 +188,9 @@ function runAutoScan() {
 
     writeStatus_(resultSheet, resumeIndex, totalCount, 'Processing...');
 
+    // Pre-fetch process-based GAS detection for all fileIds
+    var processResults = checkGasByProcesses_(fileIds);
+
     var results = [];
 
     for (var i = resumeIndex; i < fileIds.length; i++) {
@@ -203,7 +210,8 @@ function runAutoScan() {
       if (fileId === '') continue;
 
       Logger.log('Processing: ' + (i + 1) + '/' + totalCount + ' - ' + fileId);
-      var result = checkFile_(fileId);
+      var procRes = processResults[fileId] || null;
+      var result = checkFile_(fileId, procRes);
       results.push(result);
     }
 
@@ -307,16 +315,104 @@ function getFileIds_(ss, useUi) {
 }
 
 // ============================================================
+// Process-based GAS detection via Apps Script API
+// ============================================================
+
+// checkGasByProcesses_ - bulk check fileIds using processes.list API
+// Returns object: { fileId: { found: true/false, scriptName: str }, ... }
+function checkGasByProcesses_(fileIds) {
+  var result = {};
+  for (var i = 0; i < fileIds.length; i++) {
+    result[fileIds[i].trim()] = { found: false, scriptName: '' };
+  }
+
+  var token = ScriptApp.getOAuthToken();
+  var options = {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + token },
+    muteHttpExceptions: true
+  };
+
+  // 1. Fetch all processes with pagination
+  var scriptIds = {};
+  var nextPageToken = null;
+
+  do {
+    var url = 'https://script.googleapis.com/v1/processes?pageSize=200';
+    if (nextPageToken) {
+      url += '&pageToken=' + nextPageToken;
+    }
+    var response = UrlFetchApp.fetch(url, options);
+    var code = response.getResponseCode();
+    if (code !== 200) {
+      Logger.log('processes.list failed: HTTP ' + code);
+      break;
+    }
+    var data = JSON.parse(response.getContentText());
+    var processes = data.processes || [];
+
+    for (var p = 0; p < processes.length; p++) {
+      var proc = processes[p];
+      if (proc.scriptId && !scriptIds[proc.scriptId]) {
+        scriptIds[proc.scriptId] = true;
+      }
+    }
+
+    nextPageToken = data.nextPageToken || null;
+  } while (nextPageToken);
+
+  // 2. For each unique scriptId, get parentId via projects.get
+  var parentMap = {};
+  var scriptIdList = Object.keys(scriptIds);
+
+  for (var s = 0; s < scriptIdList.length; s++) {
+    var sid = scriptIdList[s];
+    var projUrl = 'https://script.googleapis.com/v1/projects/' + sid;
+    var projResp = UrlFetchApp.fetch(projUrl, options);
+    var projCode = projResp.getResponseCode();
+    if (projCode !== 200) {
+      Logger.log('projects.get failed for ' + sid + ': HTTP ' + projCode);
+      continue;
+    }
+    var projData = JSON.parse(projResp.getContentText());
+    var parentId = projData.parentId || '';
+    var scriptTitle = projData.title || sid;
+
+    if (parentId) {
+      if (!parentMap[parentId]) {
+        parentMap[parentId] = [];
+      }
+      parentMap[parentId].push(scriptTitle);
+    }
+  }
+
+  // 3. Match fileIds against parentMap
+  for (var f = 0; f < fileIds.length; f++) {
+    var fid = fileIds[f].trim();
+    if (parentMap[fid]) {
+      result[fid] = {
+        found: true,
+        scriptName: parentMap[fid].join(', ')
+      };
+    }
+  }
+
+  Logger.log('checkGasByProcesses_: ' + scriptIdList.length + ' scriptIds, ' + Object.keys(parentMap).length + ' parents mapped');
+  return result;
+}
+
+// ============================================================
 // File check
 // ============================================================
 
 // checkFile_ - check single file for bound GAS via indirect detection
-function checkFile_(fileId) {
+function checkFile_(fileId, processResult) {
   var result = {
     fileId: fileId,
     fileName: '',
     owner: '',
     hasGas: false,
+    gasSource: '',
     scriptName: '',
     checkDate: new Date(),
     error: ''
@@ -341,9 +437,19 @@ function checkFile_(fileId) {
     return result;
   }
 
+  // Check processes.list result first
+  if (processResult && processResult.found) {
+    result.hasGas = true;
+    result.gasSource = 'process';
+    result.scriptName = processResult.scriptName;
+    return result;
+  }
+
+  // Fallback to custom function detection
   var indirectResult = checkGasIndirect_(fileId);
   if (indirectResult.found) {
     result.hasGas = true;
+    result.gasSource = 'custom func';
     result.scriptName = indirectResult.scriptName;
   } else if (indirectResult.details && indirectResult.details.indexOf('check failed') === 0) {
     result.scriptName = indirectResult.details;
@@ -555,6 +661,8 @@ function buildResultRows_(results) {
     var gasStatus;
     if (r.error) {
       gasStatus = r.error;
+    } else if (r.hasGas && r.gasSource === 'process') {
+      gasStatus = 'あり (process)';
     } else if (r.hasGas) {
       gasStatus = 'あり (custom func)';
     } else if (r.scriptName && r.scriptName.indexOf('check failed') === 0) {
