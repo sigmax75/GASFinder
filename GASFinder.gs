@@ -227,6 +227,7 @@ function runAutoScan() {
     writeStatus_(resultSheet, totalCount, totalCount, 'Completed');
     Logger.log('GASFinder: All done - ' + totalCount + ' files');
 
+    props.setProperty('GASFINDER_COMPLETED', '1');
     deleteGASFinderTriggers_();
     clearProgress_();
   } finally {
@@ -256,6 +257,7 @@ function clearProgress_() {
   var props = PropertiesService.getScriptProperties();
   props.deleteProperty(PROP_KEYS.RESUME_INDEX);
   props.deleteProperty(PROP_KEYS.TOTAL_COUNT);
+  props.deleteProperty('GASFINDER_COMPLETED');
   props.deleteProperty(PROP_KEYS.PROCESS_CACHE);
   props.deleteProperty(PROP_KEYS.PROCESS_CACHE_TIME);
   props.deleteProperty(PROP_KEYS.PROCESS_PARTIAL);
