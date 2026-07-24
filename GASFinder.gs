@@ -391,6 +391,7 @@ function checkGasByProcesses_(fileIds) {
       }
       var data = JSON.parse(response.getContentText());
       var processes = data.processes || [];
+      Logger.log('DEBUG processes.list: HTTP ' + code + ', count=' + processes.length + ', hasNext=' + (data.nextPageToken ? 'yes' : 'no'));
 
       for (var p = 0; p < processes.length; p++) {
         var proc = processes[p];
@@ -402,6 +403,8 @@ function checkGasByProcesses_(fileIds) {
       nextPageToken = data.nextPageToken || null;
     } while (nextPageToken);
   }
+
+  Logger.log('DEBUG total unique scriptIds: ' + Object.keys(scriptIds).length);
 
   // 2. For each unique scriptId, get parentId via projects.get
   var parentMap = {};
@@ -446,6 +449,8 @@ function checkGasByProcesses_(fileIds) {
       };
     }
   }
+
+  Logger.log('DEBUG parentMap keys: ' + Object.keys(parentMap).length + ', matched: ' + Object.keys(result).filter(function(k) { return result[k].found; }).length);
 
   // 4. Save cache, clear partial
   props.setProperty(PROP_KEYS.PROCESS_CACHE, JSON.stringify(result));
