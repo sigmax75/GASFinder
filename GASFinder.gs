@@ -497,7 +497,7 @@ function checkFile_(fileId, processResult) {
     // Try REST API for owner (DriveApp.getOwner may be restricted)
     try {
       var token = ScriptApp.getOAuthToken();
-      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=name,owners,sharingUser,permissions(emailAddress,role)&supportsAllDrives=true';
+      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?supportsAllDrives=true';
       var metaResp = UrlFetchApp.fetch(metaUrl, {
         headers: { Authorization: 'Bearer ' + token },
         muteHttpExceptions: true
