@@ -393,7 +393,6 @@ function checkGasByProcesses_(fileIds) {
       }
       var data = JSON.parse(response.getContentText());
       var processes = data.processes || [];
-      Logger.log('DEBUG processes.list: HTTP ' + code + ', count=' + processes.length + ', hasNext=' + (data.nextPageToken ? 'yes' : 'no'));
 
       for (var p = 0; p < processes.length; p++) {
         var proc = processes[p];
@@ -406,7 +405,6 @@ function checkGasByProcesses_(fileIds) {
     } while (nextPageToken);
   }
 
-  Logger.log('DEBUG total unique scriptIds: ' + Object.keys(scriptIds).length);
 
   // 2. For each unique scriptId, get parentId via projects.get
   var parentMap = {};
@@ -452,7 +450,6 @@ function checkGasByProcesses_(fileIds) {
     }
   }
 
-  Logger.log('DEBUG parentMap keys: ' + Object.keys(parentMap).length + ', matched: ' + Object.keys(result).filter(function(k) { return result[k].found; }).length);
 
   // 4. Save cache, clear partial
   props.setProperty(PROP_KEYS.PROCESS_CACHE, JSON.stringify(result));
@@ -497,16 +494,17 @@ function checkFile_(fileId, processResult) {
     // Try REST API for owner (DriveApp.getOwner may be restricted)
     try {
       var token = ScriptApp.getOAuthToken();
-      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?supportsAllDrives=true';
+      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=owners(emailAddress),lastModifyingUser(emailAddress)&supportsAllDrives=true';
       var metaResp = UrlFetchApp.fetch(metaUrl, {
         headers: { Authorization: 'Bearer ' + token },
         muteHttpExceptions: true
       });
-      Logger.log('DEBUG owner API: HTTP ' + metaResp.getResponseCode() + ' body=' + metaResp.getContentText().substring(0, 500));
       if (metaResp.getResponseCode() === 200) {
         var metaData = JSON.parse(metaResp.getContentText());
         if (metaData.owners && metaData.owners.length > 0) {
           result.owner = metaData.owners[0].emailAddress || '';
+        } else if (metaData.lastModifyingUser && metaData.lastModifyingUser.emailAddress) {
+          result.owner = metaData.lastModifyingUser.emailAddress;
         }
       }
     } catch (ownerErr) {
