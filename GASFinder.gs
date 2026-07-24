@@ -497,12 +497,12 @@ function checkFile_(fileId, processResult) {
     // Try REST API for owner (DriveApp.getOwner may be restricted)
     try {
       var token = ScriptApp.getOAuthToken();
-      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=owners(emailAddress)&supportsAllDrives=true';
+      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=name,owners,sharingUser,permissions(emailAddress,role)&supportsAllDrives=true';
       var metaResp = UrlFetchApp.fetch(metaUrl, {
         headers: { Authorization: 'Bearer ' + token },
         muteHttpExceptions: true
       });
-      Logger.log('DEBUG owner API: HTTP ' + metaResp.getResponseCode() + ' body=' + metaResp.getContentText().substring(0, 200));
+      Logger.log('DEBUG owner API: HTTP ' + metaResp.getResponseCode() + ' body=' + metaResp.getContentText().substring(0, 500));
       if (metaResp.getResponseCode() === 200) {
         var metaData = JSON.parse(metaResp.getContentText());
         if (metaData.owners && metaData.owners.length > 0) {
