@@ -528,28 +528,36 @@ function checkFile_(fileId, processResult) {
 // Indirect GAS detection via custom function scan
 // ============================================================
 
-// checkGasIndirect_ - detect GAS by finding custom functions in formulas
+// checkGasIndirect_ - detect GAS by finding custom functions in formulas (60s timeout)
 function checkGasIndirect_(fileId) {
   var result = { found: false, scriptName: '', details: '' };
+  var startTime = new Date().getTime();
+  var TIMEOUT_MS = 60000;
   try {
     var ss = SpreadsheetApp.openById(fileId);
     var sheets = ss.getSheets();
     var customFuncs = [];
+    var timedOut = false;
 
     for (var s = 0; s < sheets.length; s++) {
+      if (new Date().getTime() - startTime > TIMEOUT_MS) {
+        timedOut = true;
+        break;
+      }
       var sheet = sheets[s];
       var range = sheet.getDataRange();
       var formulas = range.getFormulas();
 
       for (var r = 0; r < formulas.length; r++) {
+        if (new Date().getTime() - startTime > TIMEOUT_MS) {
+          timedOut = true;
+          break;
+        }
         for (var c = 0; c < formulas[r].length; c++) {
           var formula = formulas[r][c];
           if (formula === '') continue;
-
-          // Extract function names from formula
           var funcMatches = formula.match(/[A-Za-z_][A-Za-z0-9_]*\s*\(/g);
           if (!funcMatches) continue;
-
           for (var m = 0; m < funcMatches.length; m++) {
             var funcName = funcMatches[m].replace(/\s*\($/, '').toUpperCase();
             if (!isBuiltinFunction_(funcName)) {
@@ -557,11 +565,20 @@ function checkGasIndirect_(fileId) {
             }
           }
         }
+        if (timedOut) break;
+      }
+      if (timedOut) break;
+    }
+
+    if (timedOut) {
+      Logger.log('checkGasIndirect_ timeout for ' + fileId);
+      result.details = 'check timeout';
+      if (customFuncs.length > 0) {
+        result.found = true;
       }
     }
 
     if (customFuncs.length > 0) {
-      // Remove duplicates
       var unique = [];
       for (var i = 0; i < customFuncs.length; i++) {
         if (unique.indexOf(customFuncs[i]) === -1) {
@@ -570,7 +587,7 @@ function checkGasIndirect_(fileId) {
       }
       result.found = true;
       result.scriptName = unique.join(', ');
-      result.details = 'custom functions detected';
+      if (!timedOut) result.details = 'custom functions detected';
     }
   } catch (e) {
     Logger.log('Indirect check error (fileId: ' + fileId + '): ' + e.message);
@@ -578,6 +595,7 @@ function checkGasIndirect_(fileId) {
   }
   return result;
 }
+
 
 // ============================================================
 // Built-in function list
