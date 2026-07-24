@@ -494,8 +494,29 @@ function checkFile_(fileId, processResult) {
   try {
     var file = DriveApp.getFileById(fileId);
     result.fileName = file.getName();
-    var owner = file.getOwner();
-    result.owner = owner ? owner.getEmail() : '';
+    // Try REST API for owner (DriveApp.getOwner may be restricted)
+    try {
+      var token = ScriptApp.getOAuthToken();
+      var metaUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=owners(emailAddress)&supportsAllDrives=true';
+      var metaResp = UrlFetchApp.fetch(metaUrl, {
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true
+      });
+      if (metaResp.getResponseCode() === 200) {
+        var metaData = JSON.parse(metaResp.getContentText());
+        if (metaData.owners && metaData.owners.length > 0) {
+          result.owner = metaData.owners[0].emailAddress || '';
+        }
+      }
+    } catch (ownerErr) {
+      // Fallback to DriveApp
+      var owner = file.getOwner();
+      result.owner = owner ? owner.getEmail() : '';
+    }
+    if (!result.owner) {
+      var owner = file.getOwner();
+      result.owner = owner ? owner.getEmail() : '';
+    }
   } catch (e) {
     Logger.log('DEBUG DriveApp.getFileById error: ' + String(e) + ' | message: ' + (e.message || 'none'));
     var errMsg = String(e.message || e);
