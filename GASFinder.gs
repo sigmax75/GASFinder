@@ -502,6 +502,7 @@ function checkFile_(fileId, processResult) {
         headers: { Authorization: 'Bearer ' + token },
         muteHttpExceptions: true
       });
+      Logger.log('DEBUG owner API: HTTP ' + metaResp.getResponseCode() + ' body=' + metaResp.getContentText().substring(0, 200));
       if (metaResp.getResponseCode() === 200) {
         var metaData = JSON.parse(metaResp.getContentText());
         if (metaData.owners && metaData.owners.length > 0) {
